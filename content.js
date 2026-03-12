@@ -162,10 +162,6 @@
       if (html) sendResult("PROBLEM_STATEMENT", { html: html || null, contestId: parsed.contestId, problemIndex: parsed.index }, null);
     }
 
-    // CRITICAL SECURITY FIX: ONLY MATCH USER'S OWN STATUS PAGES
-    // 1. /submissions/tourist (User profile page)
-    // 2. /contest/1234/my (User's specific contest page)
-    // 3. /problemset/status?my=on (User's explicit problemset filter)
     const isMyStatusPage = 
       path.includes("/submissions/") || 
       /\/contest\/\d+\/my/.test(path) || 
@@ -174,17 +170,15 @@
     if (isMyStatusPage) {
       checkLatestAcceptedAndNotify();
 
-      // NEW CODE: Watch the status table for live AJAX updates
       const statusTable = document.querySelector("table.status-frame-datatable");
       if (statusTable) {
         const tableObserver = new MutationObserver(() => {
           checkLatestAcceptedAndNotify();
         });
-        // This triggers every time the table content changes (e.g., to "Accepted")
         tableObserver.observe(statusTable, { childList: true, subtree: true, characterData: true });
       }
     }
-  } // <--- The extra brace was right below here. It is fixed now!
+  }
 
   let lastSeenSubmission = null;
   let checkPending = false;
@@ -192,11 +186,10 @@
   function findLatestAcceptedFromStatusTable() {
     try {
       const rows = document.querySelectorAll("table.status-frame-datatable tr");
-      for (let i = 1; i < rows.length; i++) { // Skip the header row
+      for (let i = 1; i < rows.length; i++) { 
         const row = rows[i];
         const verdict = row.querySelector(".verdict-accepted, .verdict-accepted__text, span[submissionverdict='OK']");
         
-        // If not accepted, skip and check the next row
         if (!verdict && !/accepted|OK/i.test(row.innerText)) continue; 
         
         const link = row.querySelector("a.view-source, td:nth-child(1) a, a[href*='/submission/']");
@@ -222,12 +215,16 @@
           }
         }
 
+        // ---> NEW FIX: Grabbing the programming language from the 5th column
+        const langCell = row.querySelector("td:nth-child(5)");
+        const language = langCell ? langCell.textContent.trim() : "txt";
+
         if (!contestId) {
           const urlMatch = window.location.pathname.match(/\/contest\/(\d+)/);
           if (urlMatch) contestId = urlMatch[1];
         }
 
-        return { submissionId, problemName, contestId, problemIndex, pageUrl: window.location.href };
+        return { submissionId, problemName, contestId, problemIndex, language, pageUrl: window.location.href };
       }
     } catch (e) {}
     return null;
@@ -244,13 +241,15 @@
         lastSeenSubmission = res.submissionId;
         log("Detected new accepted submission:", res.submissionId);
 
+        // ---> NEW FIX: Sending the correct language to the background
         sendAction({
           action: "cf_submission_detected",
           submissionId: res.submissionId,
           contestId: res.contestId,
           problemIndex: res.problemIndex || 'A',
           pageUrl: res.pageUrl,
-          problemName: res.problemName || null
+          problemName: res.problemName || null,
+          language: res.language 
         });
       }
     } catch (err) { console.error(err); } 
