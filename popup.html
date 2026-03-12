@@ -1,0 +1,56 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Codeforces → GitHub Sync</title>
+
+<style>
+body { font-family: Arial, sans-serif; width: 320px; margin: 0; padding: 15px; background: #f7f7f7; }
+h2 { margin: 0 0 15px 0; font-size: 18px; text-align: center; color: #24292e; }
+section { margin-bottom: 15px; background: white; padding: 12px; border-radius: 8px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+label { font-size: 12px; font-weight: bold; display: block; margin-top: 10px; color: #444; }
+input { width: 100%; padding: 8px; margin-top: 4px; border: 1px solid #ccc; border-radius: 4px; font-size: 13px; box-sizing: border-box; }
+button { margin-top: 12px; padding: 8px; width: 100%; background: #2f80ed; color: white; border: none; border-radius: 4px; cursor: pointer; font-weight: bold; }
+button:hover { background: #1e66d0; }
+.btn-github { background: #24292e; margin-top: 0; }
+.btn-github:hover { background: #000; }
+.sync { background: #27ae60; }
+.sync:hover { background: #1f8f4d; }
+.stats { display: flex; justify-content: space-between; font-size: 13px; }
+.note { font-size: 11px; color: #666; margin-top: 8px; text-align: center; }
+ul { padding-left: 15px; max-height: 80px; overflow: auto; margin: 8px 0 0 0; }
+li { font-size: 12px; padding: 2px 0; color: #333; }
+</style>
+</head>
+
+<body>
+<h2>CF → GitHub</h2>
+
+<section>
+  <button id="loginBtn" class="btn-github">Connect to GitHub</button>
+  
+  <label>Repository URL</label>
+  <input id="repo" placeholder="https://github.com/tourist/cf-solutions">
+
+  <button id="save">Save Settings</button>
+</section>
+
+<section>
+  <div class="stats">
+    <div>Total Solves: <b id="total">0</b></div>
+    <div>Streak: <b id="streak">0</b></div>
+  </div>
+  <label style="margin-top: 12px;">Recent Problems</label>
+  <ul id="last"></ul>
+</section>
+
+<section style="margin-bottom: 0;">
+  <button class="sync" id="sync">Force Manual Sync</button>
+  <div class="note">
+    Clicking this forces the extension to push your most recent accepted solution immediately.
+  </div>
+</section>
+
+<script src="popup.js"></script>
+</body>
+</html>
