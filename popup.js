@@ -132,7 +132,11 @@
     // Reformat input field to show full URL immediately
     if ($('repo')) $('repo').value = `https://github.com/${repoRaw}`;
 
-    try { chrome.runtime.sendMessage({ action: 'triggerImmediateSync' }); } catch {}
+      try { 
+      chrome.runtime.sendMessage({ action: 'triggerImmediateSync' }, () => {
+        if(chrome.runtime.lastError) {} 
+      }); 
+    } catch {}
   }
 
   function onManualSync() {

@@ -11,13 +11,28 @@
       const msgLegacy = Object.assign({}, base);
       if (type === "SUBMISSION_CODE") msgLegacy.code = payload && payload.code ? payload.code : (payload || null);
       if (type === "PROBLEM_STATEMENT") msgLegacy.html = payload && payload.html ? payload.html : (payload || null);
-      chrome.runtime.sendMessage(msgNew);
-      chrome.runtime.sendMessage(msgLegacy);
+      
+      // FIX: Silently ignore the harmless port closed warning
+      const checkError = () => {
+        if (chrome.runtime.lastError && chrome.runtime.lastError.message !== "The message port closed before a response was received.") {
+           warn("Message error:", chrome.runtime.lastError.message);
+        }
+      };
+
+      chrome.runtime.sendMessage(msgNew, checkError);
+      chrome.runtime.sendMessage(msgLegacy, checkError);
     } catch (e) { warn(`Failed to send ${type}:`, e); }
   }
 
   function sendAction(actionObj) {
-    try { chrome.runtime.sendMessage(actionObj); } 
+    try { 
+      chrome.runtime.sendMessage(actionObj, () => {
+        // FIX: Silently ignore the harmless port closed warning
+        if (chrome.runtime.lastError && chrome.runtime.lastError.message !== "The message port closed before a response was received.") {
+           warn("Message error:", chrome.runtime.lastError.message);
+        }
+      }); 
+    } 
     catch (e) { warn("Failed to send action:", e); }
   }
 

@@ -147,15 +147,26 @@ async function fetchSubmissionCode_viaNewTab(contestId, submissionId, timeoutMs 
       }
       chrome.tabs.onUpdated.addListener(listener);
     });
+    
+    // FIX: Added retry loop to wait for Codeforces code block to render
     const results = await chrome.scripting.executeScript({
       target: { tabId },
-      func: () => {
-        const el = document.querySelector('#program-source-text') || document.querySelector('.program-source') || document.querySelector('pre');
-        return el ? (el.innerText || el.textContent) : null;
+      func: async () => {
+        let attempts = 0;
+        while(attempts < 10) {
+           const el = document.querySelector('#program-source-text') || document.querySelector('.program-source') || document.querySelector('pre');
+           if (el && (el.innerText || el.textContent)) return (el.innerText || el.textContent);
+           await new Promise(r => setTimeout(r, 500));
+           attempts++;
+        }
+        return null;
       }
     });
     return results?.[0]?.result || null;
-  }catch(e){ return null; }
+  }catch(e){ 
+    console.error("fetchSubmissionCode_viaNewTab error:", e);
+    return null; 
+  }
   finally{ if(tabId) chrome.tabs.remove(tabId).catch(()=>{}); inFlight.delete(submissionId); }
 }
 
@@ -425,12 +436,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       }
       
       lastProcessedSubmissionId = submissionId; 
-      try{
+      try {
+        console.log(`Processing submission: ${submissionId}`);
         const cfg = await getConfig();
-        if(!cfg.githubToken || !cfg.linkedRepo || !cfg.cf_handle || !isValidRepoFullName(cfg.linkedRepo) || !msg.contestId) return;
+        if(!cfg.githubToken || !cfg.linkedRepo || !cfg.cf_handle || !isValidRepoFullName(cfg.linkedRepo) || !msg.contestId) {
+            console.error("Missing config or invalid repo name. Push aborted.", cfg);
+            return;
+        }
         
         let code = await fetchSubmissionCode_viaExistingTab(msg.contestId, submissionId, 8000) || await fetchSubmissionCode_viaNewTab(msg.contestId, submissionId, 10000);
-        if(!code) return;
+        
+        if(!code) {
+            console.error("Code extraction failed! Codeforces returned null.");
+            return;
+        }
         
         const name = msg.problemName || `${msg.contestId}_${msg.problemIndex || 'A'}`;
         const ext = detectExtension(msg.language || 'txt');
@@ -440,12 +459,20 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         const codeContent = `// Problem: ${name}\n// Contest: ${msg.contestId}\n// Submission id: ${submissionId}\n\n${code}`;
         
         recordRequest('github');
+        console.log(`Attempting to push to GitHub path: ${codePath}`);
+        
+        // FIX: The error is actually caught and logged now if GitHub fails
         await pushFileToGitHub(cfg.linkedRepo, cfg.githubToken, codePath, codeContent, `Add ${name}`);
+        
+        console.log("Successfully pushed to GitHub!");
         
         // Save to storage lock so it NEVER pushes again
         syncedMap[submissionId] = { ts: Date.now(), title: name };
         await chrome.storage.sync.set({ 'cf-synced-problems': syncedMap });
-      }catch(e){ }
+      } catch(e) { 
+        // FIX: Silent crash is gone. You will see the error in the background console!
+        console.error("CRITICAL ERROR pushing to GitHub:", e); 
+      }
     });
     return;
   }
