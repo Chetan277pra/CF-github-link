@@ -22,8 +22,7 @@
     "tabs",
     "alarms",
     "scripting",
-    "activeTab",
-    "identity" 
+    "activeTab" 
   ],
   "host_permissions": [
     "https://codeforces.com/*",

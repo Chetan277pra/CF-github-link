@@ -5,9 +5,28 @@ self.addEventListener('activate', () => self.clients.claim());
 // ---- Utilities ----
 function base64Encode(str){ return btoa(unescape(encodeURIComponent(str))); }
 function sleep(ms){ return new Promise(r => setTimeout(r, ms)); }
-function storageGet(keys){ return new Promise(resolve => chrome.storage.sync.get(keys, res => resolve(res || {}))); }
+
+function storageGet(keys){
+  return new Promise(resolve => {
+    chrome.storage.local.get(keys, localRes => {
+      if (localRes && Object.keys(localRes).length > 0) {
+        resolve(localRes);
+      } else {
+        chrome.storage.sync.get(keys, syncRes => resolve(syncRes || {}));
+      }
+    });
+  });
+}
+
 function storageGetLocal(keys){ return new Promise(resolve => chrome.storage.local.get(keys, res => resolve(res || {}))); }
-function storageSet(obj){ return new Promise(resolve => chrome.storage.sync.set(obj, () => resolve())); }
+
+function storageSet(obj){
+  return new Promise(resolve => {
+    chrome.storage.local.set(obj, () => {
+      chrome.storage.sync.set(obj, () => resolve());
+    });
+  });
+}
 
 // ---- Config helpers ----
 async function getConfig(){
