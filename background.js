@@ -1,4 +1,6 @@
 // background.js 
+const BG_BUILD = '2026-04-19-fix-config-abort-v4';
+console.log(`[CF2GH] background loaded: ${BG_BUILD}`);
 self.addEventListener('install', () => self.skipWaiting());
 self.addEventListener('activate', () => self.clients.claim());
 
@@ -28,26 +30,116 @@ function storageSet(obj){
   });
 }
 
+function pickConfigValue(localVal, syncVal){
+  const localStr = cleanString(localVal);
+  if (localStr) return localStr;
+  const syncStr = cleanString(syncVal);
+  if (syncStr) return syncStr;
+  return '';
+}
+
+function cleanString(v){
+  if (v == null) return '';
+  if (typeof v === 'string') return v.trim();
+  if (typeof v === 'number' || typeof v === 'boolean') return String(v).trim();
+  return '';
+}
+
+function normalizeRepoInput(value){
+  if (!value) return null;
+
+  if (typeof value === 'object') {
+    const ownerObj = cleanString(value.owner || value.repoOwner || value.username);
+    const repoObj = cleanString(value.repo || value.repoName || value.name);
+    if (ownerObj && repoObj) return `${ownerObj}/${repoObj}`;
+    return null;
+  }
+
+  let raw = cleanString(value);
+  if (!raw) return null;
+
+  raw = raw.replace(/^git@github\.com:/i, '');
+
+  if (/^https?:\/\//i.test(raw) || /^github\.com\//i.test(raw)) {
+    try {
+      const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+      const u = new URL(withProto);
+      if (/github\.com$/i.test(u.hostname)) {
+        raw = u.pathname.replace(/^\/+|\/+$/g, '');
+      }
+    } catch (_) {
+      return null;
+    }
+  }
+
+  if (raw.endsWith('.git')) raw = raw.slice(0, -4);
+  raw = raw.replace(/^\/+|\/+$/g, '');
+  const parts = raw.split('/').map(p => p.trim()).filter(Boolean);
+  if (parts.length !== 2) return null;
+
+  return `${parts[0]}/${parts[1]}`;
+}
+
 // ---- Config helpers ----
 async function getConfig(){
-  const sync = await storageGet(['githubToken','linkedRepo','cf_handle','pathPrefix','syncIntervalMinutes','repoOwner','repoName']);
-  const local = await storageGetLocal(['githubToken','linkedRepo','repoOwner','repoName','cf_handle','pathPrefix','syncIntervalMinutes']);
-  const cfg = Object.assign({}, local, sync);
-  if(!cfg.linkedRepo && cfg.repoOwner && cfg.repoName){
-    cfg.linkedRepo = `${String(cfg.repoOwner).trim()}/${String(cfg.repoName).trim()}`;
+  const keys = ['githubToken','linkedRepo','cf_handle','pathPrefix','syncIntervalMinutes','repoOwner','repoName'];
+  const sync = await new Promise(resolve => chrome.storage.sync.get(keys, res => resolve(res || {})));
+  const local = await storageGetLocal(keys);
+  const cfg = {
+    githubToken: pickConfigValue(local.githubToken, sync.githubToken),
+    linkedRepo: pickConfigValue(local.linkedRepo, sync.linkedRepo),
+    cf_handle: pickConfigValue(local.cf_handle, sync.cf_handle),
+    pathPrefix: pickConfigValue(local.pathPrefix, sync.pathPrefix),
+    syncIntervalMinutes: pickConfigValue(local.syncIntervalMinutes, sync.syncIntervalMinutes),
+    repoOwner: pickConfigValue(local.repoOwner, sync.repoOwner),
+    repoName: pickConfigValue(local.repoName, sync.repoName)
+  };
+  const originalLinkedRepo = cfg.linkedRepo;
+
+  const normalizedLinkedRepo = normalizeRepoInput(cfg.linkedRepo);
+  if (normalizedLinkedRepo) {
+    cfg.linkedRepo = normalizedLinkedRepo;
+  } else if (cfg.repoOwner && cfg.repoName) {
+    cfg.linkedRepo = `${cfg.repoOwner}/${cfg.repoName}`;
+  } else {
+    cfg.linkedRepo = '';
   }
-  if(cfg.linkedRepo) cfg.linkedRepo = String(cfg.linkedRepo).trim();
-  if(cfg.githubToken) cfg.githubToken = String(cfg.githubToken).trim();
-  if(cfg.cf_handle) cfg.cf_handle = String(cfg.cf_handle).trim();
-  if(cfg.pathPrefix) cfg.pathPrefix = String(cfg.pathPrefix).trim();
+
+  if (cfg.linkedRepo) {
+    const parsed = parseRepoFullName(cfg.linkedRepo);
+    if (parsed) {
+      cfg.repoOwner = parsed.owner;
+      cfg.repoName = parsed.repo;
+
+      // Keep storage normalized so future reads don't fail on stale URL/object values.
+      if (
+        cfg.linkedRepo !== originalLinkedRepo ||
+        cfg.repoOwner !== cleanString(local.repoOwner || sync.repoOwner) ||
+        cfg.repoName !== cleanString(local.repoName || sync.repoName)
+      ) {
+        await storageSet({
+          linkedRepo: cfg.linkedRepo,
+          repoOwner: cfg.repoOwner,
+          repoName: cfg.repoName
+        });
+      }
+    }
+  }
+
   return cfg;
 }
 
 function parseRepoFullName(full){
-  if(!full || typeof full !== 'string') return null;
-  const parts = full.trim().split('/');
+  const normalized = normalizeRepoInput(full);
+  if(!normalized) return null;
+  const parts = normalized.split('/');
   if(parts.length !== 2) return null;
-  return { owner: parts[0].trim(), repo: parts[1].trim() };
+  const owner = parts[0].trim();
+  const repo = parts[1].trim();
+  if(!owner || !repo) return null;
+  if(!/^[A-Za-z0-9_.-]+$/.test(owner)) return null;
+  if(!/^[A-Za-z0-9_.-]+$/.test(repo)) return null;
+  return { owner, repo };
 }
 function isValidRepoFullName(full){ return !!parseRepoFullName(full); }
 
@@ -61,8 +153,9 @@ async function getFileSha(owner,repo,path,token){
   throw new Error(`GitHub getFileSha error ${r.status}: ${text}`);
 }
 async function pushFileToGitHub(repoFullName, token, path, content, message){
-  if(!isValidRepoFullName(repoFullName)) throw new Error('Invalid repoFullName, expected "owner/repo"');
-  const repo = parseRepoFullName(repoFullName);
+  const normalizedRepo = normalizeRepoInput(repoFullName);
+  if(!isValidRepoFullName(normalizedRepo)) throw new Error('Invalid repoFullName, expected "owner/repo"');
+  const repo = parseRepoFullName(normalizedRepo);
   const sha = await getFileSha(repo.owner, repo.repo, path, token).catch(err => { throw err; });
   const body = { message, content: base64Encode(content) };
   if(sha) body.sha = sha;
@@ -263,10 +356,22 @@ function cleanHTML(html){
   }catch(err){ return html; }
 }
 
+async function resolveContestIdForSubmission(submissionId, cfHandle){
+  if(!submissionId || !cfHandle) return null;
+  try{
+    const submissions = await fetchAcceptedSubmissions(cfHandle, 200);
+    const hit = submissions.find(s => String(s.id) === String(submissionId));
+    return hit && hit.contestId ? String(hit.contestId) : null;
+  } catch (_) {
+    return null;
+  }
+}
+
 let syncing = false;
 let lastProcessedSubmissionId = null;
 
 async function syncLatest(githubToken, repoFullName, cfHandle){
+  repoFullName = normalizeRepoInput(repoFullName);
   if(syncing) return;
   if(!githubToken || !repoFullName || !cfHandle) return;
   if(!isValidRepoFullName(repoFullName)) return;
@@ -340,10 +445,11 @@ async function syncLatest(githubToken, repoFullName, cfHandle){
 async function setupPeriodicSync(){
   try{
     const cfg = await getConfig();
-    if(cfg.githubToken && cfg.linkedRepo && cfg.cf_handle){
+    const repoFullName = normalizeRepoInput(cfg.linkedRepo);
+    if(cfg.githubToken && repoFullName && cfg.cf_handle){
       await chrome.alarms.clear('cfPusherSync');
       chrome.alarms.create('cfPusherSync', { delayInMinutes: 0.5, periodInMinutes: 0.5 });
-      await syncLatest(cfg.githubToken, cfg.linkedRepo, cfg.cf_handle);
+      await syncLatest(cfg.githubToken, repoFullName, cfg.cf_handle);
     } else { await chrome.alarms.clear('cfPusherSync'); }
   }catch(e){ }
 }
@@ -351,7 +457,8 @@ async function setupPeriodicSync(){
 chrome.alarms.onAlarm.addListener(async alarm =>{
   if(alarm.name === 'cfPusherSync'){
     const cfg = await getConfig();
-    if(cfg.githubToken && cfg.linkedRepo && cfg.cf_handle) await syncLatest(cfg.githubToken, cfg.linkedRepo, cfg.cf_handle);
+    const repoFullName = normalizeRepoInput(cfg.linkedRepo);
+    if(cfg.githubToken && repoFullName && cfg.cf_handle) await syncLatest(cfg.githubToken, repoFullName, cfg.cf_handle);
   }
 });
 chrome.runtime.onStartup.addListener(setupPeriodicSync);
@@ -364,41 +471,81 @@ chrome.storage.onChanged.addListener((changes, area) =>{
 chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   
   if (msg.action === 'authenticate') {
-    // 1. Keep your Client ID to open the login window, but the Secret is completely REMOVED!
     const CLIENT_ID = "Ov23liHDX7AZD7tHScJS"; 
+    const TOKEN_PROXY_URL = "https://cf-github-link.vercel.app/api/authenticate";
     
     const redirectUri = chrome.identity.getRedirectURL(); 
     const authUrl = `https://github.com/login/oauth/authorize?client_id=${CLIENT_ID}&redirect_uri=${encodeURIComponent(redirectUri)}&scope=repo`;
 
     chrome.identity.launchWebAuthFlow({ url: authUrl, interactive: true }, async (responseUrl) => {
       if (chrome.runtime.lastError || !responseUrl) {
-        sendResponse({ success: false, error: "Login window closed or failed." });
+        const runtimeErr = chrome.runtime.lastError && chrome.runtime.lastError.message
+          ? chrome.runtime.lastError.message
+          : "Login window closed or failed.";
+        sendResponse({ success: false, error: runtimeErr });
         return;
       }
-      const urlParams = new URLSearchParams(new URL(responseUrl).search);
+      let parsedUrl;
+      try {
+        parsedUrl = new URL(responseUrl);
+      } catch (e) {
+        sendResponse({ success: false, error: "Invalid OAuth redirect URL." });
+        return;
+      }
+
+      const urlParams = new URLSearchParams(parsedUrl.search);
+      const oauthError = urlParams.get('error');
+      const oauthErrorDescription = urlParams.get('error_description');
+      if (oauthError) {
+        sendResponse({ success: false, error: oauthErrorDescription || oauthError });
+        return;
+      }
+
       const code = urlParams.get('code');
 
       if (code) {
         try {
-          // 2. Send the code to YOUR new Vercel proxy server!
-          const tokenRes = await fetch("https://cf-github-link.vercel.app/api/authenticate", {
+          const tokenRes = await fetch(TOKEN_PROXY_URL, {
             method: "POST",
             headers: { "Accept": "application/json", "Content-Type": "application/json" },
-            // Notice we only send the code now. The server handles the secret.
-            body: JSON.stringify({ code: code }) 
+            body: JSON.stringify({ code, redirectUri, clientId: CLIENT_ID })
           });
-          
-          const tokenData = await tokenRes.json();
+
+          const rawTokenResponse = await tokenRes.text();
+          let tokenData = null;
+          try {
+            tokenData = rawTokenResponse ? JSON.parse(rawTokenResponse) : {};
+          } catch (_) {
+            tokenData = { error: `Non-JSON response from auth proxy: ${rawTokenResponse.slice(0, 120)}` };
+          }
+
+          if (!tokenRes.ok) {
+            const proxyError = tokenData && (tokenData.error_description || tokenData.error)
+              ? (tokenData.error_description || tokenData.error)
+              : `Auth proxy failed with status ${tokenRes.status}`;
+            sendResponse({ success: false, error: proxyError });
+            return;
+          }
           
           if (tokenData.access_token) {
             await storageSet({ githubToken: tokenData.access_token });
             await chrome.storage.local.set({ githubToken: tokenData.access_token });
             sendResponse({ success: true });
           } else { 
-            sendResponse({ success: false, error: "Failed to get token from server." }); 
+            const oauthExchangeError = tokenData.error_description || tokenData.error || "Failed to get token from server.";
+            sendResponse({ success: false, error: oauthExchangeError }); 
           }
         } catch (err) { 
-          sendResponse({ success: false, error: err.message }); 
+          const msg = err && err.message ? String(err.message) : 'Authentication request failed.';
+          const looksLikeCorsOrMissingEndpoint = /cors|failed to fetch|networkerror/i.test(msg);
+          if (looksLikeCorsOrMissingEndpoint) {
+            sendResponse({
+              success: false,
+              error: 'Auth proxy is unreachable or missing. Verify https://cf-github-link.vercel.app/api/authenticate is deployed and returns CORS headers for OPTIONS and POST.'
+            });
+          } else {
+            sendResponse({ success: false, error: msg });
+          }
         }
       } else { 
         sendResponse({ success: false, error: "No code found." }); 
@@ -421,7 +568,8 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
   // --- FORCE MANUAL SYNC LOGIC ---
   if(msg.action === 'manualSync'){
     getConfig().then(cfg=>{
-      if(cfg.githubToken && cfg.linkedRepo && cfg.cf_handle){
+      const repoFullName = normalizeRepoInput(cfg.linkedRepo);
+      if(cfg.githubToken && repoFullName && cfg.cf_handle){
         
         // FORCIBLY CLEAR MEMORY TO ALLOW PUSHING THE LAST PROBLEM AGAIN
         lastProcessedSubmissionId = null;
@@ -429,17 +577,23 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
         cache.submissions = { data: null, ts: 0, ttl: 30000 };
         syncing = false; 
 
-        syncLatest(cfg.githubToken, cfg.linkedRepo, cfg.cf_handle)
+        syncLatest(cfg.githubToken, repoFullName, cfg.cf_handle)
           .then(()=> sendResponse({ success:true }))
           .catch(e=> sendResponse({ success:false, error: e.message }));
           
-      } else sendResponse({ success:false, error:'Missing credentials' });
+      } else sendResponse({ success:false, error:'Missing token, handle, or valid repository (owner/repo)' });
     });
     return true;
   }
 
   if(msg.action === 'triggerImmediateSync'){
-    getConfig().then(cfg=> { if(cfg.githubToken && cfg.linkedRepo && cfg.cf_handle){ cache.submissions = { data:null, ts:0 }; syncLatest(cfg.githubToken, cfg.linkedRepo, cfg.cf_handle); } });
+    getConfig().then(cfg=> {
+      const repoFullName = normalizeRepoInput(cfg.linkedRepo);
+      if(cfg.githubToken && repoFullName && cfg.cf_handle){
+        cache.submissions = { data:null, ts:0 };
+        syncLatest(cfg.githubToken, repoFullName, cfg.cf_handle);
+      }
+    });
     return;
   }
 
@@ -458,30 +612,59 @@ chrome.runtime.onMessage.addListener((msg, sender, sendResponse) => {
       try {
         console.log(`Processing submission: ${submissionId}`);
         const cfg = await getConfig();
-        if(!cfg.githubToken || !cfg.linkedRepo || !cfg.cf_handle || !isValidRepoFullName(cfg.linkedRepo) || !msg.contestId) {
-            console.error("Missing config or invalid repo name. Push aborted.", cfg);
+        const repoFullName = normalizeRepoInput(cfg.linkedRepo);
+        let contestId = msg.contestId ? String(msg.contestId) : null;
+
+        if(!contestId && cfg.cf_handle) {
+          contestId = await resolveContestIdForSubmission(submissionId, cfg.cf_handle);
+        }
+
+        const abortReasons = [];
+        if(!cfg.githubToken) abortReasons.push('missing_github_token');
+        if(!cfg.cf_handle) abortReasons.push('missing_cf_handle');
+        if(!repoFullName || !isValidRepoFullName(repoFullName)) abortReasons.push('invalid_repo');
+        if(!contestId) abortReasons.push('missing_contest_id');
+
+        if(abortReasons.length > 0) {
+            const abortContext = {
+              reasons: abortReasons,
+              hasToken: !!cfg.githubToken,
+              repo: cfg.linkedRepo,
+              normalizedRepo: repoFullName,
+              hasHandle: !!cfg.cf_handle,
+              contestId: contestId || null,
+              submissionId
+            };
+
+            // Not configured yet is expected and should not appear as a runtime extension error.
+            const isUnconfigured = !cfg.githubToken && !cfg.cf_handle && !repoFullName;
+            if (isUnconfigured) {
+              console.log(`Push skipped (extension not configured yet). ${JSON.stringify(abortContext)}`);
+            } else {
+              console.warn(`Push skipped due to incomplete configuration/data. ${JSON.stringify(abortContext)}`);
+            }
             return;
         }
         
-        let code = await fetchSubmissionCode_viaExistingTab(msg.contestId, submissionId, 8000) || await fetchSubmissionCode_viaNewTab(msg.contestId, submissionId, 10000);
+        let code = await fetchSubmissionCode_viaExistingTab(contestId, submissionId, 8000) || await fetchSubmissionCode_viaNewTab(contestId, submissionId, 10000);
         
         if(!code) {
             console.error("Code extraction failed! Codeforces returned null.");
             return;
         }
         
-        const name = msg.problemName || `${msg.contestId}_${msg.problemIndex || 'A'}`;
+        const name = msg.problemName || `${contestId}_${msg.problemIndex || 'A'}`;
         const ext = detectExtension(msg.language || 'txt');
         const prefix = (cfg.pathPrefix && cfg.pathPrefix.trim()) || 'Codeforces';
         const safeTitle = (name).replace(/[\\/:*?"<>|]+/g,'').replace(/\s+/g,'_');
-        const codePath = `${prefix}/${msg.contestId}/${msg.problemIndex || 'A'}_${safeTitle}_solution.${ext}`;
-        const codeContent = `// Problem: ${name}\n// Contest: ${msg.contestId}\n// Submission id: ${submissionId}\n\n${code}`;
+        const codePath = `${prefix}/${contestId}/${msg.problemIndex || 'A'}_${safeTitle}_solution.${ext}`;
+        const codeContent = `// Problem: ${name}\n// Contest: ${contestId}\n// Submission id: ${submissionId}\n\n${code}`;
         
         recordRequest('github');
         console.log(`Attempting to push to GitHub path: ${codePath}`);
         
         // FIX: The error is actually caught and logged now if GitHub fails
-        await pushFileToGitHub(cfg.linkedRepo, cfg.githubToken, codePath, codeContent, `Add ${name}`);
+        await pushFileToGitHub(repoFullName, cfg.githubToken, codePath, codeContent, `Add ${name}`);
         
         console.log("Successfully pushed to GitHub!");
         

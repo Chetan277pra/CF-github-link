@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "CF → GitHub AutoPusher",
   "description": "Automatically pushes accepted Codeforces submissions to your GitHub repository.",
-  "version": "1.0",
+  "version": "1.0.1",
   "icons": {
     "16": "icon.png",
     "32": "icon.png",
@@ -22,12 +22,14 @@
     "tabs",
     "alarms",
     "scripting",
+    "identity",
     "activeTab" 
   ],
   "host_permissions": [
     "https://codeforces.com/*",
     "https://api.github.com/*",
-    "https://github.com/*"
+    "https://github.com/*",
+    "https://cf-github-link.vercel.app/*"
   ],
   "content_scripts": [
     {

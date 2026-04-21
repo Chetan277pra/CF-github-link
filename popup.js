@@ -3,6 +3,47 @@
 (() => {
   const $ = id => document.getElementById(id);
 
+  function normalizeRepoInput(value) {
+    if (!value) return null;
+    let raw = String(value).trim();
+    if (!raw) return null;
+
+    raw = raw.replace(/^git@github\.com:/i, '');
+
+    if (/^https?:\/\//i.test(raw) || /^github\.com\//i.test(raw)) {
+      try {
+        const withProto = /^https?:\/\//i.test(raw) ? raw : `https://${raw}`;
+        const u = new URL(withProto);
+        if (/github\.com$/i.test(u.hostname)) {
+          raw = u.pathname.replace(/^\/+|\/+$/g, '');
+        }
+      } catch (_) {
+        return null;
+      }
+    }
+
+    if (raw.endsWith('.git')) raw = raw.slice(0, -4);
+    raw = raw.replace(/^\/+|\/+$/g, '');
+
+    const parts = raw.split('/').map(p => p.trim()).filter(Boolean);
+    if (parts.length !== 2) return null;
+    if (!/^[A-Za-z0-9_.-]+$/.test(parts[0])) return null;
+    if (!/^[A-Za-z0-9_.-]+$/.test(parts[1])) return null;
+
+    return `${parts[0]}/${parts[1]}`;
+  }
+
+  function formatError(err) {
+    if (err == null) return 'Unknown error';
+    if (typeof err === 'string') return err;
+    if (err && typeof err.message === 'string' && err.message.trim()) return err.message.trim();
+    try {
+      return JSON.stringify(err);
+    } catch (_) {
+      return String(err);
+    }
+  }
+
   function notify(msg, time = 2000) {
     let el = $('notify');
     if (!el) {
@@ -19,17 +60,28 @@
       el.style.zIndex = '9999';
       document.body.appendChild(el);
     }
-    el.textContent = msg;
+    el.textContent = formatError(msg);
     el.style.opacity = '1';
     setTimeout(() => { el.style.opacity = '0'; }, time);
   }
 
   function promisifyStorageGet(keys) {
-    return new Promise(resolve => { chrome.storage.sync.get(keys, res => resolve(res || {})); });
+    return new Promise(resolve => {
+      chrome.storage.sync.get(keys, syncRes => {
+        chrome.storage.local.get(keys, localRes => {
+          const merged = Object.assign({}, syncRes || {}, localRes || {});
+          resolve(merged);
+        });
+      });
+    });
   }
 
   function promisifyStorageSet(obj) {
-    return new Promise(resolve => { chrome.storage.sync.set(obj, () => resolve()); });
+    return new Promise(resolve => {
+      chrome.storage.sync.set(obj, () => {
+        chrome.storage.local.set(obj, () => resolve());
+      });
+    });
   }
 
   function wireButtons() {
@@ -63,8 +115,9 @@
     }
     
     // Display the full URL to the user, even though we store "owner/repo"
-    if (res.linkedRepo && $('repo')) {
-      $('repo').value = `https://github.com/${res.linkedRepo}`;
+    const normalizedRepo = normalizeRepoInput(res.linkedRepo);
+    if (normalizedRepo && $('repo')) {
+      $('repo').value = `https://github.com/${normalizedRepo}`;
     }
 
     if (!res.cf_handle) {
@@ -83,13 +136,21 @@
     loginBtn.disabled = true;
 
     chrome.runtime.sendMessage({ action: "authenticate" }, (response) => {
+      if (chrome.runtime.lastError) {
+        loginBtn.textContent = "Connect to GitHub";
+        loginBtn.disabled = false;
+        notify(`Login failed: ${formatError(chrome.runtime.lastError.message)}`);
+        return;
+      }
+
       if (response && response.success) {
         notify("Successfully Connected to GitHub!");
         loadSettings(); 
       } else {
         loginBtn.textContent = "Connect to GitHub";
         loginBtn.disabled = false;
-        notify("Login failed or window closed.");
+        const reason = response && response.error ? formatError(response.error) : "Login failed or window closed.";
+        notify(`Login failed: ${reason}`);
       }
     });
   }
@@ -102,17 +163,8 @@
       return;
     }
 
-    // Extract "owner/repo" from the full URL safely
-    let repoRaw = repoInput;
-    if (repoRaw.startsWith('http') || repoRaw.includes('github.com')) {
-       try {
-         const urlObj = new URL(repoRaw.startsWith('http') ? repoRaw : 'https://' + repoRaw);
-         repoRaw = urlObj.pathname.replace(/^\/|\/$/g, ''); // Removes leading/trailing slashes
-         if (repoRaw.endsWith('.git')) repoRaw = repoRaw.slice(0, -4); // Remove .git if present
-       } catch(e) {}
-    }
-
-    if (repoRaw.split("/").length !== 2) {
+    const repoRaw = normalizeRepoInput(repoInput);
+    if (!repoRaw) {
       notify('Invalid URL. Must be: https://github.com/owner/repo');
       return;
     }
@@ -121,8 +173,11 @@
     if (!handle) handle = await autoFetchCFHandle();
 
     // Save formatted "owner/repo" to storage
+    const [repoOwner, repoName] = repoRaw.split('/');
     await promisifyStorageSet({ 
       linkedRepo: repoRaw, 
+      repoOwner,
+      repoName,
       cf_handle: handle || "unknown", 
       pathPrefix: "Codeforces" 
     });
@@ -143,7 +198,7 @@
     notify('Starting manual sync…');
     chrome.runtime.sendMessage({ action: 'manualSync' }, (resp) => {
       if (resp && resp.success) notify('Manual sync succeeded!');
-      else notify('Manual sync failed.');
+      else notify(resp && resp.error ? `Manual sync failed: ${formatError(resp.error)}` : 'Manual sync failed.');
       setTimeout(loadSettings, 800);
     });
   }
